@@ -233,12 +233,15 @@ def train_models(
     y_tr = y_train.values
     if use_smote and HAS_SMOTE:
         try:
-            sm = SMOTE(random_state=42, k_neighbors=min(5, int(y_tr.sum()) - 1))
+            # On large datasets (>50k rows), balance to 1:5 ratio to avoid synthesizing 250k rows
+            ratio = 0.2 if len(X_tr) > 50000 else 1.0
+            sm = SMOTE(sampling_strategy=ratio, random_state=42, k_neighbors=min(5, int(y_tr.sum()) - 1))
             X_tr, y_tr = sm.fit_resample(X_tr, y_tr)
         except Exception:
             pass  # Fall back to unbalanced if SMOTE fails
 
     # ── Build model instances ─────────────────────────────────────────────────
+    is_large = len(X_tr) > 50000
     model_map = {
         "Logistic Regression": LogisticRegression(
             max_iter=1000, class_weight="balanced", random_state=42, solver="lbfgs"
@@ -247,7 +250,11 @@ def train_models(
             max_depth=8, class_weight="balanced", random_state=42
         ),
         "Random Forest": RandomForestClassifier(
-            n_estimators=100, class_weight="balanced", random_state=42, n_jobs=-1
+            n_estimators=50 if is_large else 100,
+            max_samples=0.5 if is_large else None,
+            class_weight="balanced",
+            random_state=42,
+            n_jobs=-1
         ),
     }
 

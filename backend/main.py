@@ -7,7 +7,10 @@ All REST API endpoints for the fraud detection system.
 from __future__ import annotations
 
 import io
+import json
+import time
 import traceback
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -56,7 +59,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── In-memory state ───────────────────────────────────────────────────────────
+# ── Dataset persistence paths ──────────────────────────────────────────────────
+SAVED_MODELS_DIR = Path(__file__).parent / "saved_models"
+DATASET_PATH = SAVED_MODELS_DIR / "active_dataset.pkl.gz"
+DATASET_META_PATH = SAVED_MODELS_DIR / "active_dataset_meta.json"
+
+# ── State ─────────────────────────────────────────────────────────────────────
 
 CURRENT_DF: Optional[pd.DataFrame] = None
 IS_SAMPLE_DATA: bool = True
@@ -65,8 +73,18 @@ IS_SAMPLE_DATA: bool = True
 
 @app.on_event("startup")
 async def startup_event():
-    """Load synthetic data on startup as demo fallback."""
+    """Load persisted dataset or fallback to synthetic data on startup."""
     global CURRENT_DF, IS_SAMPLE_DATA
+    SAVED_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    if DATASET_PATH.exists():
+        try:
+            CURRENT_DF = pd.read_pickle(DATASET_PATH, compression="gzip")
+            IS_SAMPLE_DATA = False
+            print(f"[FraudShield] Loaded persisted dataset: {len(CURRENT_DF)} rows")
+            return
+        except Exception as e:
+            print(f"[FraudShield] Failed to load persisted dataset ({e}), falling back to synthetic.")
+
     CURRENT_DF = generate_synthetic_dataset(n_samples=2000, fraud_ratio=0.025)
     IS_SAMPLE_DATA = True
 
@@ -89,8 +107,16 @@ async def health():
 async def dashboard():
     global CURRENT_DF, IS_SAMPLE_DATA
     if CURRENT_DF is None:
-        CURRENT_DF = generate_synthetic_dataset()
-        IS_SAMPLE_DATA = True
+        if DATASET_PATH.exists():
+            try:
+                CURRENT_DF = pd.read_pickle(DATASET_PATH, compression="gzip")
+                IS_SAMPLE_DATA = False
+            except Exception:
+                CURRENT_DF = generate_synthetic_dataset()
+                IS_SAMPLE_DATA = True
+        else:
+            CURRENT_DF = generate_synthetic_dataset()
+            IS_SAMPLE_DATA = True
     try:
         data = pipeline.get_dashboard_data(CURRENT_DF, IS_SAMPLE_DATA)
         return JSONResponse(content=data)
@@ -98,7 +124,54 @@ async def dashboard():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── Dataset upload ────────────────────────────────────────────────────────────
+# ── Dataset endpoints ─────────────────────────────────────────────────────────
+
+@app.get("/api/dataset/status", tags=["Dataset"])
+async def dataset_status():
+    global CURRENT_DF, IS_SAMPLE_DATA
+    if CURRENT_DF is None:
+        return {"loaded": False, "is_sample_data": True}
+
+    fraud_count = int(CURRENT_DF["Class"].sum()) if "Class" in CURRENT_DF.columns else 0
+    total_rows = len(CURRENT_DF)
+
+    meta = {}
+    if DATASET_META_PATH.exists():
+        try:
+            meta = json.loads(DATASET_META_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    return {
+        "loaded": True,
+        "is_sample_data": IS_SAMPLE_DATA,
+        "filename": meta.get("filename", "Synthetic Demo Dataset" if IS_SAMPLE_DATA else "Custom Dataset"),
+        "rows": total_rows,
+        "columns": len(CURRENT_DF.columns),
+        "fraud_count": fraud_count,
+        "genuine_count": total_rows - fraud_count,
+        "fraud_rate": round(fraud_count / max(total_rows, 1) * 100, 3),
+        "upload_time": meta.get("upload_time"),
+    }
+
+
+@app.post("/api/dataset/reset", tags=["Dataset"])
+async def reset_dataset():
+    global CURRENT_DF, IS_SAMPLE_DATA
+    if DATASET_PATH.exists():
+        try:
+            DATASET_PATH.unlink()
+        except Exception:
+            pass
+    if DATASET_META_PATH.exists():
+        try:
+            DATASET_META_PATH.unlink()
+        except Exception:
+            pass
+    CURRENT_DF = generate_synthetic_dataset(n_samples=2000, fraud_ratio=0.025)
+    IS_SAMPLE_DATA = True
+    return {"status": "ok", "message": "Reset to synthetic demo dataset."}
+
 
 @app.post("/api/upload", tags=["Dataset"])
 async def upload_dataset(file: UploadFile = File(...)):
@@ -121,6 +194,22 @@ async def upload_dataset(file: UploadFile = File(...)):
     if stats["is_valid"]:
         CURRENT_DF = df
         IS_SAMPLE_DATA = False
+
+        # Persist to disk so dataset survives restarts
+        try:
+            SAVED_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+            df.to_pickle(DATASET_PATH, compression="gzip")
+            meta = {
+                "filename": file.filename,
+                "rows": len(df),
+                "columns": len(df.columns),
+                "is_sample_data": False,
+                "upload_time": time.strftime("%Y-%m-%d %H:%M:%S")
+            }
+            DATASET_META_PATH.write_text(json.dumps(meta), encoding="utf-8")
+        except Exception as e:
+            print(f"[FraudShield] Warning: Failed to persist dataset to disk: {e}")
+
         # Clear old models so user re-trains on new data
         pipeline.MODEL_REGISTRY.clear()
         pipeline.TRAINED_METRICS.clear()

@@ -20,6 +20,8 @@ export const getHealth = () => api.get('/health')
 export const getDashboard = () => api.get('/dashboard')
 export const getEvaluation = () => api.get('/evaluation')
 export const getInsights = () => api.get('/insights')
+export const getDatasetStatus = () => api.get('/dataset/status')
+export const resetDataset = () => api.post('/dataset/reset')
 
 export const uploadDataset = (file) => {
   const fd = new FormData()
@@ -27,7 +29,7 @@ export const uploadDataset = (file) => {
   return api.post('/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
 }
 
-export const trainModels = (payload) => api.post('/train', payload)
+export const trainModels = (payload) => api.post('/train', payload, { timeout: 600000 })
 
 export const predictSingle = (features, model_name) =>
   api.post('/predict', { features, model_name })
