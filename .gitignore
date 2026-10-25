@@ -44,3 +44,5 @@ Thumbs.db
 creditcard.csv
 *.zip
 *.tar.gz
+backend/saved_models/active_dataset.pkl.gz
+backend/saved_models/active_dataset_meta.json
